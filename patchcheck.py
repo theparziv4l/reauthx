@@ -12,6 +12,11 @@ Examples:
 The checks: #1 CVE-2025-33073 . #2 CVE-2025-58726 . #4 same-user re-auth = CVE-2026-69676 (KB5124008,
 8 Sep 2026; reported by @mad31k). #1/#2 are inferred
 from the UBR (MSRC tables); #4 is a feature flag, not readable from the UBR -> tested only via --probe.
+CAVEAT: the #4 probe swaps USER->USER (two low-priv accounts). The live attack reflects the victim's
+MACHINE account to itself, and the Sep-2026 hardening (CVE-2026-69676; KB5124008 ships it as "Machine
+Identity Isolation") can refuse that MACHINE reflection while still allowing a user->user swap. So an
+"absent" #4 here is a PRECONDITION, not a guarantee - the live relay's reflected re-auth is the only
+authoritative test (watch for "re-auth refused (0xC0000022)" in the relay log).
 The Mar-2026 loopback-signing fix (24294/26128) is deliberately not checked here: it never changes the
 RCE verdict, and build 26100 spans two UBR trains (client 24H2 vs Server 2025) that one threshold cannot
 tell apart. The re-auth bypass is used regardless, so lean on --probe.
@@ -215,7 +220,9 @@ def recommend(st, signing_required, is_dc):
     if st["#4"] == "MISSING":
         return pack("33073+58726 patched, same-user re-auth absent", "LPE",
                     "Unicode", "local forwarder (58726)",
-                    signing="re-auth signing bypass required")
+                    signing="re-auth signing bypass required",
+                    note="#4 probe is USER->USER; the MACHINE-account reflection can still be refused "
+                         "(CVE-2026-69676 / machine-identity isolation) - the live relay is authoritative")
     if st["#4"] == "UNKNOWN":
         return pack("likely still open (#4 unconfirmed)", "LPE",
                     "Unicode", "local forwarder (58726)",

