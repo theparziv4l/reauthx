@@ -97,7 +97,12 @@ the command line; `./reauthx.sh help` lists every option.
 ## Credits
 
 - [krbrelayx](https://github.com/dirkjanm/krbrelayx) by [Dirk-jan Mollema](https://github.com/dirkjanm) ; all the heavy lifting is his.
-- [Synacktiv](https://www.synacktiv.com) (CVE-2025-33073, CVE-2026-26128).
+- [Synacktiv](https://www.synacktiv.com) — the reflection chain: **CVE-2025-33073** (CMTI client reflection),
+  **CVE-2025-58726** (Ghost SPNs), **CVE-2026-24294** (arbitrary SMB port), **CVE-2026-26128** (Unicode confusable).
+- **CVE-2026-69676** (reported by @mad31k) — the same-user re-authentication check that closes `--reauth-bypass`,
+  shipped in [KB5124008](https://support.microsoft.com/help/5124008) (8 Sep 2026). `patchcheck.py` tests for it (`#4`).
+- [Semperis](https://www.semperis.com/blog/exploiting-ghost-spns-and-kerberos-reflection-for-smb-server-privilege-elevation/) — Ghost SPNs / Kerberos reflection write-up (CVE-2025-58726).
+- SpecterOps (Raj Patel) — *LDAP Switcheroo*: the same re-auth swap against LDAP signing on DCs (the path toward NTDS/DCSync).
 
 ## License
 

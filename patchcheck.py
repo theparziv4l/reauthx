@@ -9,7 +9,8 @@ Examples:
   patchcheck.py AD.LOCAL/bob:Pass1@10.0.0.5                       # passive scan (1 account)
   patchcheck.py AD.LOCAL/bob:Pass1@10.0.0.5 --probe alice:Pass2   # + test #4 (2nd DIFFERENT account)
 
-The checks: #1 CVE-2025-33073 . #2 CVE-2025-58726 . #4 same-user re-auth (Sep 2026). #1/#2 are inferred
+The checks: #1 CVE-2025-33073 . #2 CVE-2025-58726 . #4 same-user re-auth = CVE-2026-69676 (KB5124008,
+8 Sep 2026; reported by @mad31k). #1/#2 are inferred
 from the UBR (MSRC tables); #4 is a feature flag, not readable from the UBR -> tested only via --probe.
 The Mar-2026 loopback-signing fix (24294/26128) is deliberately not checked here: it never changes the
 RCE verdict, and build 26100 spans two UBR trains (client 24H2 vs Server 2025) that one threshold cannot
@@ -41,12 +42,12 @@ P2_58726 = {
     (10, 0, 20348): 4294, (10, 0, 22621): 6060, (10, 0, 25398): 1913, (10, 0, 26100): 6899,
     (10, 0, 26200): 6899,
 }
-P4_REAUTH = {}   # same-user re-auth (Sep 2026) - feature flag, no reliable UBR -> --probe
+P4_REAUTH = {}   # CVE-2026-69676 same-user re-auth check (KB5124008, 8 Sep 2026; @mad31k) - feature flag, no reliable UBR -> --probe
 
 PATCHES = [
     ("#1", "CVE-2025-33073 (client mrxsmb)", P1_33073),
     ("#2", "CVE-2025-58726 (loopback-IP / GhostSPN)", P2_58726),
-    ("#4", "same-user re-auth (Sep2026, flag)", P4_REAUTH),
+    ("#4", "CVE-2026-69676 same-user re-auth (KB5124008, Sep2026)", P4_REAUTH),
 ]
 
 STATUS = {0x00000000: "STATUS_SUCCESS", 0xC0000016: "MORE_PROCESSING_REQUIRED",
@@ -69,7 +70,7 @@ def col(code, s):
 LABEL = {
     "#1": "CVE-2025-33073         client reflection (CMTI)",
     "#2": "CVE-2025-58726         loopback source-IP (GhostSPN)",
-    "#4": "same-user re-auth      (Sep 2026, feature flag)",
+    "#4": "CVE-2026-69676         same-user re-auth (KB5124008, Sep 2026)",
 }
 _STAT = {"MISSING": ("32", "absent"), "PATCHED": ("2", "patched"), "UNKNOWN": ("33", "unknown")}
 _IMPACT = {"RCE": "1;32", "LPE": "1;33", "CLOSED": "1;31", "?": "33"}
@@ -221,7 +222,7 @@ def recommend(st, signing_required, is_dc):
                     signing="re-auth signing bypass required",
                     note="re-run with --probe (2nd account) to confirm #4")
     if st["#4"] == "PATCHED":
-        return ("chain closed (Sep-2026 same-user re-auth present)", "CLOSED",
+        return ("chain closed (CVE-2026-69676 same-user re-auth present)", "CLOSED",
                 [("reason", "the same-user check blocks the identity swap")])
     return ("undetermined (#4 not confirmed for this build)", "?",
             [("hint", "use --probe")])
