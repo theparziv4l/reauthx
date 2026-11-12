@@ -1,0 +1,4 @@
+# these run on Linux (Kali) - keep LF even when edited on Windows, or the
+# shebang becomes "#!/usr/bin/env bash\r" and the scripts fail to start.
+*.sh text eol=lf
+*.py text eol=lf
