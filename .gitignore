@@ -8,6 +8,7 @@ venv/
 .venv/
 
 # runtime output / loot - never commit captured material
+loot/
 *.ccache
 *.kirbi
 *.log
